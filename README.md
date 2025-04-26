@@ -112,24 +112,6 @@ Time remaining: 0:05:23
 ### `balance.py` Functions
 - `chk_balance()` - Retrieves and displays wallet balances
 
-## Error Handling
-- Comprehensive logging to `snipe_system.log`
-- API error catching and display
-- Price validation checks
-- Connection error handling
-
-## Security Notes
-- Never share your `.env` file
-- Use API keys with appropriate permissions only
-- Consider using testnet for development
-- The script only requires trading permissions
-
-## Customization
-1. Change rounding precision via `ROUND_QUANTITY`
-2. Modify logging format in `logging.basicConfig`
-3. Adjust sleep interval in main loop
-4. Add additional order types as needed
-
 ## Output Example
 ```
  >> Buy order successful 
@@ -144,7 +126,6 @@ BTCUSDT amount for sell: 0.023
  >> Sell Limit-order placed 
 <Press -Enter- for exit>
 ```
-
 
 ## ⚠️ Known issues to be fixed: </br>
 - not correct count of sell amount
