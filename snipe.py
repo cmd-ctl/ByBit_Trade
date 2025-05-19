@@ -1,146 +1,135 @@
-import datetime
 import os
 import time
-import json
 import math
+import datetime
 from dotenv import load_dotenv
-from past.builtins import raw_input
 from pybit.unified_trading import HTTP
-import logging
-import balance
 
-logging.basicConfig(filename="snipe_system.log", level=logging.DEBUG,
-                    format="%(asctime)s %(levelname)s %(message)s")
+load_dotenv()
 
-def connect():
-    load_dotenv()
+API_KEY = os.environ["BYBIT_API_KEY"]
+API_SECRET = os.environ["BYBIT_SECRET"]
+ROUND_QUANTITY = float(os.environ.get("ROUND_QUANTITY", 0.0001))
+TAKER_FEE_RATE = float(os.environ.get("TAKER_FEE_RATE", 0.0006))  # Default 0.06%
 
-    BYBIT_API_KEY = os.environ.get("API_KEY")
-    BYBIT_API_SECRET = os.environ.get("SECRET")
-    TESTNET = False  # True means your API keys were generated on testnet.bybit.com
+client = HTTP(
+    api_key=API_KEY,
+    api_secret=API_SECRET
+)
 
-    session = HTTP(
-        api_key=BYBIT_API_KEY,
-        api_secret=BYBIT_API_SECRET,
-        testnet=TESTNET,
-    )
-    return session
+def wait_until(start_time):
+    print(f"[INFO] Waiting until: {start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    while datetime.datetime.utcnow() < start_time:
+        time.sleep(0.1)
+    print("[INFO] Time reached. Proceeding.")
+
+def get_price(symbol):
+    try:
+        res = client.get_tickers(category="spot", symbol=symbol)
+        return float(res["result"]["list"][0]["lastPrice"])
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch price: {e}")
+        return 0.0
+
+def place_market_buy(symbol, usdt_amount):
+    print(f"[INFO] Placing MARKET BUY for {usdt_amount} USDT of {symbol}")
+    try:
+        order = client.place_order(
+            category="spot",
+            symbol=symbol,
+            side="Buy",
+            orderType="Market",
+            quoteQty=round(usdt_amount, 2)
+        )
+        return order["result"]["orderId"]
+    except Exception as e:
+        print(f"[ERROR] Failed to place BUY order: {e}")
+        return None
+
+def get_executed_qty(order_id):
+    try:
+        time.sleep(0.3)
+        data = client.get_order_history(category="spot", orderId=order_id)
+        return float(data["result"]["list"][0]["cumExecQty"])
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch executed quantity: {e}")
+        return 0.0
+
+def round_down(value, step):
+    return math.floor(value / step) * step
+
+def place_limit_sell(symbol, qty, price):
+    print(f"[INFO] Placing LIMIT SELL for {qty} {symbol} at {price} USDT")
+    try:
+        order = client.place_order(
+            category="spot",
+            symbol=symbol,
+            side="Sell",
+            orderType="Limit",
+            qty=qty,
+            price=price,
+            timeInForce="GTC"
+        )
+        return order["result"]["orderId"]
+    except Exception as e:
+        print(f"[ERROR] Failed to place SELL order: {e}")
+        return None
 
 def main():
+    # --- Input ---
+    pair = input("Enter token pair (e.g., TONUSDT): ").upper()
+    amount_usdt = float(input("Enter amount in USDT: "))
+    profit_percent = float(input("Desired profit %: "))
+    entry_price_limit = float(input("Max entry price (0 for any): "))
+    t_str = input("Enter trigger time (YYYY, MM, DD, HH, MM): ")
 
-    load_dotenv()
-    print("Starting program...\nNotice: only for SPOT trading\n")
+    trigger_time = datetime.datetime.strptime(t_str, '%Y, %m, %d, %H, %M')
+    wait_until(trigger_time)
 
-    # Set ticker
-    sym = os.environ.get("TICKER")
+    # --- Price Check ---
+    market_price = get_price(pair)
+    if market_price == 0 or (entry_price_limit > 0 and market_price > entry_price_limit):
+        print("[WARN] Market price too high or unavailable. Exiting.")
+        return
 
-    def chk_price():
-        data = session.get_tickers(
-            category="spot",
-            symbol=sym,
-        )
-        tkr = json.dumps(data)
-        b = json.loads(tkr)
-        ti = b['result']
-        tik = ti['list']
-        tick = tik[0]
-        tickerB = tick['bid1Price']
-        tickerA = tick['ask1Price']
-        print("--- " + sym + " ---\nCurrent prices:\nBidPrice: " + tickerB + "\nAskPrice: " + tickerA + "\n---")
-        return tickerB
+    # --- Market Buy ---
+    order_id = place_market_buy(pair, amount_usdt)
+    if not order_id:
+        return
 
-    # check current price
-    session = connect()
-    try:
-        chk_price()
-    except Exception as e:
-        print("Ticker data not found in listing! Trade pair may not exist.\n[ERR]: " + str(e) + "\n")
+    # --- Get Executed Qty ---
+    exec_qty = get_executed_qty(order_id)
+    if exec_qty == 0:
+        print("[ERROR] Executed quantity is zero. Aborting.")
+        return
 
-# -----------  USER SETTINGS  -----------
-    # Set sell limit price
-    print("Set sell limit-order price:")
-    tpp = input()
-    # Set amount in USDT & sell amount count
-    print("Set the Amount (in basic token):")
-    qty = input()
-    # Stop price
-    print("Set Stop-buy price:")
-    abt = float(input())
-    # Set time
-    print("\nEnter the time to start:\n(YYYY, MM, DD, HH, MM)")
-    t2 = datetime.datetime.strptime(raw_input(""), '%Y, %m, %d, %H, %M')
-# -----------  END USER SETTINGS ZONE  -----------
+    # --- Adjust for Fee and Round ---
+    exec_qty *= (1 - TAKER_FEE_RATE)
+    sell_qty = round_down(exec_qty, ROUND_QUANTITY)
 
-    global k
-    k = True
-    global tickerC
+    # --- Calculate Sell Price ---
+    sell_price = round(market_price * (1 + profit_percent / 100), 6)
 
-    while k == True:
-        # Timer count
-        t_now = datetime.datetime.now()
-        if t2 < t_now:
+    # --- Place Limit Sell ---
+    sell_order_id = place_limit_sell(pair, sell_qty, sell_price)
+    if sell_order_id:
+        print(f"[SUCCESS] Sell order placed. ID: {sell_order_id}")
+        # --- Print balances ---
+        try:
+            balance = client.get_wallet_balance(accountType="spot")
+            coins = balance["result"]["list"][0]["coin"]
 
-            # Start trade action
-            session = connect()
-            try:
-                tB = chk_price()
-                tickerC = float(tB)
-            except Exception as e:
-                print(" >> Check prices failed:\n" + str(e))
+            coin_bal = next((c for c in coins if c["coin"] == pair.replace("USDT", "")), {"walletBalance": "0"})
+            usdt_bal = next((c for c in coins if c["coin"] == "USDT"), {"walletBalance": "0"})
 
-            # Check if Current price under the Stop-buy price
-            if tickerC >= abt:
-                print("Buy order won't be complete:")
-                print("Current price: " + str(tickerC) + "\nStop price: " + str(abt))
+            print(f"\nAfter trade balances:")
+            print(f"→ {coin_bal['coin']}: {coin_bal['walletBalance']}")
+            print(f"→ USDT: {usdt_bal['walletBalance']}\n")
 
-            else:
-                # Place Buy Market-order
-                try:
-                    response = session.place_order(
-                        category="spot",
-                        symbol=sym,
-                        side="Buy",
-                        orderType="Market",
-                        qty=qty,
-                        timeInForce="GTC",
-                    )
-                    print(" >> Buy order successful ")
-                except Exception as e:
-                    print(" >> Buy order failed:\n" + str(e))
-
-                # Updating prices & count sell amount
-                tB = chk_price()
-                sqt = math.floor(float(qty) / float(tB) / float(os.environ.get("ROUND_QUANTITY"))) * float(os.environ.get("ROUND_QUANTITY"))
-
-                # Account Balance check
-                balance.chk_balance()
-                print( " " + sym + " amount for sell: " + str(sqt))
-
-                # Placing Sell Limit-order
-                try:
-                    response = session.place_order(
-                        category="spot",
-                        symbol=sym,
-                        side="Sell",
-                        orderType="Limit",
-                        price=tpp,
-                        qty=str(sqt),
-                        timeInForce="GTC",
-                    )
-                    print(" >> Sell Limit-order placed ")
-                except Exception as e:
-                    print(" >> Sell order placing failed:\n" + str(e))
-
-            # Close program
-            k = False
-            print("<Press -Enter- for exit>")
-            input()
-
-        else:
-            # Count the time before action
-            delta = t2 - t_now
-            print('Time remaining: ' + str(delta))
-            time.sleep(5)
+        except Exception as e:
+            print(f"[WARN] Failed to fetch balances: {e}")
+    else:
+        print("[FAIL] Failed to place sell order.")
 
 if __name__ == "__main__":
     main()
